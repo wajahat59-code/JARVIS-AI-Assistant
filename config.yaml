@@ -1,0 +1,131 @@
+language: auto
+assistant:
+  wake_greeting: true
+  acknowledge_phrase: Sir?
+  startup_greeting: true
+  conversation_timeout: 20
+  confirmation_timeout: 10
+  safety_mode: normal
+  max_tool_rounds: 4
+  reflex: true
+  brief_mode: false
+audio:
+  input_device: null
+  output_device: 3
+  sample_rate: 16000
+  block_size: 1280
+  chime_volume: 0.35
+  output_volume: 1.0
+  barge_in: false
+  barge_in_speech_ms: 400
+  barge_in_grace_ms: 350
+  ducking:
+    enabled: false
+    level: 0.2
+    ramp_ms: 120
+wake:
+  enabled: true
+  model: hey_jarvis
+  sensitivity: 0.5
+  cooldown: 2.0
+  framework: onnx
+vad:
+  threshold: 0.5
+  silence_ms: 1300
+  min_speech_ms: 250
+  max_utterance_s: 15
+  pre_roll_ms: 300
+stt:
+  model: tiny
+  device: cpu
+  compute_type: int8
+  beam_size: 1
+  vad_filter: false
+brain:
+  host: http://127.0.0.1:11434
+  model: gpt-oss:120b-cloud
+  deep_model: null
+  think: false
+  keep_alive: -1
+  num_ctx: 8192
+  temperature: 0.6
+  history_turns: 12
+  request_timeout: 120
+  warm_on_start: true
+  brain: null
+tts:
+  engine: kokoro
+  voice: bm_george
+  speed: 1.25
+  kokoro_model: models/kokoro-v1.0.onnx
+  kokoro_voices: models/voices-v1.0.bin
+  piper_model: models/sv_SE-nst-medium.onnx
+  fallback: sapi
+ui:
+  overlay: true
+  tray: true
+  window: true
+  window_mode: auto
+  window_size:
+  - 980
+  - 720
+  window_pos: null
+  window_on_top: false
+  open_window_on_start: true
+  ring_size: 180
+  opacity: 0.92
+  always_on_top: true
+  position:
+  - 59
+  - 75
+  theme:
+    idle: '#1b3a4b'
+    listening: '#29b6f6'
+    thinking: '#ffb300'
+    speaking: '#4dd0e1'
+    paused: '#616161'
+tools:
+  default_city: Stockholm
+  home_region: SE
+  screenshot_dir: null
+  powershell_timeout: 30
+  search_results: 3
+  file_search_dirs:
+  - Desktop
+  - Documents
+  - Downloads
+  apps:
+    spotify: spotify
+    chrome: chrome
+    edge: msedge
+    firefox: firefox
+    code: code
+    vscode: code
+    steam: steam
+    discord: discord
+    explorer: explorer
+    terminal: wt
+    powershell: powershell
+    settings: 'ms-settings:'
+    calculator: calc
+    notepad: notepad
+    task manager: taskmgr
+    obs: obs64
+    youtube: https://www.youtube.com
+remote:
+  enabled: false
+  host: 127.0.0.1
+  port: 8765
+  url: ''
+  allow_guarded: false
+  speak_locally: false
+  routines: []
+system:
+  vram_gb: null
+  gpu_name: null
+logging:
+  level: DEBUG
+  file: logs/jarvis.log
+  max_bytes: 5242880
+  backups: 3
+  color: true

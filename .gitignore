@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# JARVIS runtime state
+logs/*.log
+logs/*.log.*
+memory.json
+places.json
+config.local.yaml
+logs/ducking.json
+logs/schedule.json
+logs/remote-secret.key
+
+# Downloaded model weights (hundreds of MB — fetched by scripts/fetch_models.py)
+models/*
+!models/README.md
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Installer build artifacts (the .exe files themselves are committed)
+installer/*.o
+installer/*.res
+
+# Python environment and cache
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Private configuration and user data
+.env
+.env.*
+!.env.example
+memory.json
+logs/
+*.log
+*secret*
+*credentials*
+
+# Troubleshooting backups
+*.bak
+*.backup
+*.before-*
+*.debug.bak
+
+# Test recordings
+mic_test.wav
+kokoro_voice_test.wav
+
+# Downloaded AI models
+models/*.onnx
+models/*.bin
+
+# Local browser profiles
+edge-profile/
+
+# Temporary files
+*.tmp
+
+# Locally built executables
+JARVIS.exe
+Install-JARVIS.exe
