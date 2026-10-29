@@ -1,0 +1,346 @@
+diff --git a/.gitignore b/.gitignore
+index 6cb0514..7f9ecaf 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -29,3 +29,38 @@ desktop.ini
+ # Installer build artifacts (the .exe files themselves are committed)
+ installer/*.o
+ installer/*.res
++
++# Python environment and cache
++.venv/
++venv/
++__pycache__/
++*.py[cod]
++.pytest_cache/
++
++# Private configuration and credentials
++config.yaml
++.env
++.env.*
++!.env.example
++*.pem
++*.key
++
++# Local backups
++backup/
++*.bak
++*.backup
++*.before-*
++
++# Local logs and browser profiles
++logs/
++*.log
++
++# Test audio
++mic_test.wav
++kokoro_voice_test.wav
++
++# Editor and OS files
++.vscode/
++.idea/
++Thumbs.db
++
+diff --git a/jarvis/audio/player.py b/jarvis/audio/player.py
+index 1a437dc..52dafce 100644
+--- a/jarvis/audio/player.py
++++ b/jarvis/audio/player.py
+@@ -1,9 +1,9 @@
+-"""Queued audio playback with instant cancellation.
++﻿"""Queued audio playback with instant cancellation.
+ 
+ :class:`Player` owns one worker thread that consumes ``(audio, sample_rate)`` items from
+ a queue and writes them to a lazily opened ``sounddevice.OutputStream``. Clips are written
+ in ~20 ms blocks and the loop checks a cancel generation between blocks, so
+-:meth:`Player.stop` cuts whatever is playing within roughly 50 ms — that is what makes
++:meth:`Player.stop` cuts whatever is playing within roughly 50 ms â€” that is what makes
+ barge-in feel instant, and ``stop()`` itself never blocks on the worker.
+ 
+ ``sounddevice`` is imported lazily. When it is missing (a Linux CI box, a machine with no
+@@ -27,7 +27,7 @@ logger = logging.getLogger("jarvis.audio.player")
+ 
+ #: Playback is written in blocks of this many milliseconds, which bounds how long a
+ #: stop() takes to actually silence the speakers.
+-BLOCK_MS = 20.0
++BLOCK_MS = 80.0
+ 
+ #: How long the worker waits on an empty queue before looping (and noticing close()).
+ _POLL_S = 0.1
+@@ -338,9 +338,21 @@ class Player:
+ 
+         # Prefer the clip's own rate; if the device refuses it, fall back to the rate
+         # that already worked and let the caller resample into it.
++        # Try the original rate, then supported Windows output rates.
+         candidates = [int(rate)]
+-        if current is not None and int(current) != int(rate):
++        if current is not None:
+             candidates.append(int(current))
++
++        try:
++            default_rate = int(round(
++                sd.query_devices(device_index, "output")["default_samplerate"]
++            ))
++            candidates.append(default_rate)
++        except Exception:
++            pass
++
++        candidates.extend([48000, 44100])
++        candidates = list(dict.fromkeys(candidates))
+         for candidate in candidates:
+             try:
+                 new_stream = sd.OutputStream(
+@@ -401,4 +413,4 @@ class Player:
+         return self
+ 
+     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+-        self.close()
+\ No newline at end of file
++        self.close()
+diff --git a/jarvis/brain/ollama_client.py b/jarvis/brain/ollama_client.py
+index 9144a2b..abd607c 100644
+--- a/jarvis/brain/ollama_client.py
++++ b/jarvis/brain/ollama_client.py
+@@ -2,12 +2,12 @@
+ 
+ This is the only module that talks to the language model: one POST to ``/api/chat`` with
+ ``stream=true`` and an NDJSON response turned into :class:`ChatDelta` values as the bytes
+-arrive. Nothing is buffered, so the first content fragment reaches the sentence splitter —
+-and the speech engine — long before the model has finished its answer.
++arrive. Nothing is buffered, so the first content fragment reaches the sentence splitter â€”
++and the speech engine â€” long before the model has finished its answer.
+ 
+ Robustness is the point here. A refused connection, a read timeout, a 500, an HTML error
+ page or a truncated JSON line all become exactly one ``ChatDelta(kind="error", ...)``
+-followed by the end of the iterator — no exception ever escapes :meth:`OllamaClient.chat_stream`,
++followed by the end of the iterator â€” no exception ever escapes :meth:`OllamaClient.chat_stream`,
+ because a traceback in the middle of a voice turn is a silently dead assistant. Older Ollama
+ builds reject the ``think`` field with a 400; that is retried once without it and remembered
+ for the rest of the process. Only the standard library plus ``requests`` is imported, so the
+@@ -119,6 +119,8 @@ class OllamaClient:
+         num_ctx: int = 8192,
+         temperature: float = 0.6,
+         timeout: int = 120,
++        fallback_model: str = "qwen3:4b",
++        cloud_retry_seconds: int = 60,
+         logger: Optional[logging.Logger] = None,
+     ) -> None:
+         self.host = (host or DEFAULT_HOST).rstrip("/")
+@@ -128,6 +130,9 @@ class OllamaClient:
+         self.num_ctx = int(num_ctx)
+         self.temperature = float(temperature)
+         self.timeout = int(timeout)
++        self.fallback_model = fallback_model
++        self.cloud_retry_seconds = max(1, int(cloud_retry_seconds))
++        self._cloud_retry_after = 0.0
+         self._log: logging.Logger = logger or get_logger("ollama")
+         self._session = requests.Session()
+ 
+@@ -304,30 +309,59 @@ class OllamaClient:
+         model: str | None = None,
+         think: bool | None = None,
+     ) -> Iterator[ChatDelta]:
+-        """Stream one assistant turn as :class:`ChatDelta` events.
++        """Stream from cloud, with safe local fallback before output."""
++        primary = model or self.model
++        fallback = self.fallback_model
++        is_cloud = primary.endswith((":cloud", "-cloud"))
++        allow_fallback = model is None and is_cloud and bool(fallback) and fallback != primary
++
++        selected = primary
++        if allow_fallback and time.monotonic() < self._cloud_retry_after:
++            selected = fallback
++
++        while True:
++            payload = self._payload(
++                messages, tools, model=selected,
++                think=think, stream=True,
++            )
++            response = None
++            emitted = False
++
++            try:
++                response, error = self._post(payload, stream=True)
++                if response is None:
++                    raise RuntimeError(error)
++
++                for delta in self._read_stream(response):
++                    if delta.kind == "error" and not emitted:
++                        raise RuntimeError(delta.error)
++
++                    if delta.kind in ("token", "tool_calls"):
++                        emitted = True
++
++                    yield delta
+ 
+-        A ``token`` delta per content fragment as it arrives, a ``tool_calls`` delta when
+-        the model asks for tools, then one ``done`` delta with the assembled assistant
+-        message. Any failure yields exactly one ``error`` delta and stops.
+-        """
+-        payload = self._payload(messages, tools, model=model, think=think, stream=True)
+-        response: "requests.Response | None" = None
+-        try:
+-            response, error = self._post(payload, stream=True)
+-            if response is None:
+-                yield ChatDelta(kind="error", error=error)
+                 return
+-            yield from self._read_stream(response)
+-        except Exception as exc:  # noqa: BLE001 - nothing may escape this generator
+-            self._log.error("Unexpected failure while streaming from Ollama: %s", exc)
+-            yield ChatDelta(kind="error", error="Something went wrong while talking to the local model.")
+-        finally:
+-            if response is not None:
+-                try:
+-                    response.close()
+-                except Exception:  # noqa: BLE001 - closing must not mask the real outcome
+-                    pass
+ 
++            except Exception as exc:
++                if allow_fallback and selected == primary and not emitted:
++                    self._log.warning(
++                        "Cloud model %s failed: %s. Switching to %s",
++                        primary, exc, fallback,
++                    )
++                    self._cloud_retry_after = (
++                        time.monotonic() + self.cloud_retry_seconds
++                    )
++                    selected = fallback
++                    continue
++
++                self._log.error("Model %s failed: %s", selected, exc)
++                yield ChatDelta(kind="error", error=str(exc))
++                return
++
++            finally:
++                if response is not None:
++                    response.close()
+     def _read_stream(self, response: "requests.Response") -> Iterator[ChatDelta]:
+         """Turn NDJSON lines into deltas. Stops after the first malformed line."""
+         content: list[str] = []
+diff --git a/jarvis/core/assistant.py b/jarvis/core/assistant.py
+index eb6b658..b7fd388 100644
+--- a/jarvis/core/assistant.py
++++ b/jarvis/core/assistant.py
+@@ -407,6 +407,7 @@ class Assistant:
+             self._deliver_confirmation(utterance)
+             return
+ 
++        self.log.info("VOICE DEBUG: VAD captured %.2f seconds of speech.", len(utterance) / self.sample_rate)
+         self.parts.latency.start_turn()
+         self._mode = _Mode.WORKING
+         self.state.set(AssistantState.THINKING)
+@@ -480,7 +481,9 @@ class Assistant:
+                     self._to_listening()
+ 
+     def _handle_utterance(self, utterance: np.ndarray) -> None:
++        self.log.info("VOICE DEBUG: Starting Whisper transcription.")
+         transcript = self.parts.transcriber.transcribe(utterance, self.sample_rate)
++        self.log.info("VOICE DEBUG: Whisper returned %r.", transcript.text)
+         self.parts.latency.mark("text")
+         text = (transcript.text or "").strip()
+         if not text:
+@@ -674,7 +677,9 @@ class Assistant:
+             self.parts.latency.end_turn()
+ 
+     def _on_sentence(self, sentence: str) -> None:
++        self.log.info("TTS DEBUG: Sending to speaker: %r", sentence)
+         self.parts.speaker.enqueue(sentence)
++        self.log.info("TTS DEBUG: Speaker enqueue completed.")
+         if self._hud is not None:
+             self._hud.add_reply(sentence)
+ 
+diff --git a/jarvis/core/wiring.py b/jarvis/core/wiring.py
+index f3671ea..f558405 100644
+--- a/jarvis/core/wiring.py
++++ b/jarvis/core/wiring.py
+@@ -110,6 +110,8 @@ def build(
+         num_ctx=int(cfg.get("brain.num_ctx", 8192)),
+         temperature=float(cfg.get("brain.temperature", 0.6)),
+         timeout=int(cfg.get("brain.request_timeout", 120)),
++        fallback_model=str(cfg.get("brain.fallback_model", "qwen3:4b")),
++        cloud_retry_seconds=int(cfg.get("brain.cloud_retry_seconds", 60)),
+         logger=get_logger("brain.client"),
+     )
+     conversation = Conversation(
+@@ -495,6 +497,11 @@ def resolve_model(client: OllamaClient, cfg: Config, log: logging.Logger) -> str
+     for. Nothing is written to disk; the choice applies to this run and is logged.
+     """
+     wanted = str(cfg.get("brain.model", "qwen3:8b"))
++        # Cloud models must never fall back to local models.
++    if wanted.endswith(("-cloud", ":cloud")):
++        client.model = wanted
++        log.info("Using Ollama Cloud model: %s", wanted)
++        return wanted
+     if not client.available():
+         return None
+     if client.has_model(wanted):
+diff --git a/jarvis/stt/transcriber.py b/jarvis/stt/transcriber.py
+index 1f585ad..2d4d3d6 100644
+--- a/jarvis/stt/transcriber.py
++++ b/jarvis/stt/transcriber.py
+@@ -67,7 +67,7 @@ HALLUCINATION_PATTERNS: list[re.Pattern[str]] = [
+     re.compile(r".{0,40}amara\.org.{0,40}"),
+     # Short English filler whisper emits over room tone. Confirmation words are
+     # deliberately absent - see PROTECTED_UTTERANCES.
+-    re.compile(r"(you|bye|hello|hi|uh|um|hmm|mm|so|the end|amen|goodbye)"),
++    re.compile(r"(you|bye|uh|um|hmm|mm|so|the end|amen|goodbye)"),
+     re.compile(r"(bye bye|good bye|okay okay|you know|all right|alright)"),
+     # Swedish: the direct counterparts, equally common in Nordic subtitle corpora.
+     re.compile(r"tack( så mycket| ska du ha)?"),
+@@ -329,15 +329,21 @@ class Transcriber:
+ 
+     def load(self) -> None:
+         """Load the whisper model. Blocking, thread-safe and a no-op when already loaded."""
++        self.log.info("LOAD DEBUG 1: Waiting for model lock.")
+         with self._lock:
++            self.log.info("LOAD DEBUG 2: Model lock acquired.")
+             if self._backend is not None:
+                 return
+             size, device, compute = self._resolve_settings()
+             started = time.perf_counter()
++            self.log.info("LOAD DEBUG 3: Preparing CUDA paths.")
+             add_cuda_dll_paths(self.log)
++            self.log.info("LOAD DEBUG 4: CUDA paths prepared.")
+ 
++            self.log.info("LOAD DEBUG 5: Importing faster_whisper.")
+             from faster_whisper import WhisperModel  # local import: heavy, optional on Linux
+ 
++            self.log.info("LOAD DEBUG 6: faster_whisper imported.")
+             backend: Any | None = None
+             if device == "cuda":
+                 try:
+@@ -348,7 +354,9 @@ class Transcriber:
+                     )
+                     device, compute, backend = "cpu", "int8", None
+             if backend is None:
++                self.log.info("LOAD DEBUG 7: Initializing CPU model %s.", size)
+                 backend = WhisperModel(size, device="cpu", compute_type=compute)
++                self.log.info("LOAD DEBUG 8: CPU model initialized.")
+ 
+             self._backend = backend
+             self._device_in_use = device
+@@ -381,12 +389,15 @@ class Transcriber:
+                 return Transcript("", self.language or "", 0.0, self._elapsed_ms(started))
+             samples = _resample(samples, rate, WHISPER_SAMPLE_RATE)
+ 
++            self.log.info("WHISPER DEBUG: Model ready before load: %s", self._backend is not None)
+             if self._backend is None:
+                 self.load()
++            self.log.info("WHISPER DEBUG: Model loaded: %s / %s", self._model_in_use, self._device_in_use)
+             backend = self._backend
+             if backend is None:  # pragma: no cover - load() raises instead
+                 raise RuntimeError("whisper model is not loaded")
+ 
++            self.log.info("WHISPER DEBUG: Beginning decoder.")
+             segments, info = backend.transcribe(
+                 samples,
+                 beam_size=self.beam_size,
+@@ -395,7 +406,9 @@ class Transcriber:
+                 condition_on_previous_text=False,  # stop it continuing the previous sentence
+                 no_speech_threshold=NO_SPEECH_THRESHOLD,
+             )
++            self.log.info("WHISPER DEBUG: Decoder returned; collecting segments.")
+             text, no_speech_prob, avg_logprob = self._collect(segments)
++            self.log.info("WHISPER DEBUG: Segments collected.")
+             language = str(getattr(info, "language", "") or self.language or "")
+ 
+             if text and is_hallucination(
